@@ -1,26 +1,25 @@
 use anyhow::Result;
+use claude_code_notification::system_sound_names;
 use inquire::{validator::Validation, Select, Text};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const SYSTEM_SOUNDS_DIR: &str = "/System/Library/Sounds";
-const DEFAULT_SOUNDS: &[&str] = &[
-    "Basso",
-    "Blow",
-    "Bottle",
-    "Frog",
-    "Funk",
-    "Glass",
-    "Hero",
-    "Morse",
-    "Ping",
-    "Pop",
-    "Purr",
-    "Sosumi",
-    "Submarine",
-    "Tink",
-];
+fn system_sounds_dir() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "/System/Library/Sounds"
+    } else {
+        "/usr/share/sounds/freedesktop/stereo"
+    }
+}
+
+fn system_sound_extension() -> &'static str {
+    if cfg!(target_os = "macos") {
+        ".aiff"
+    } else {
+        ".oga"
+    }
+}
 
 fn get_claude_settings_path() -> Result<PathBuf> {
     let home = std::env::var("HOME")?;
@@ -28,29 +27,29 @@ fn get_claude_settings_path() -> Result<PathBuf> {
 }
 
 fn get_available_system_sounds() -> Vec<String> {
-    let system_sounds_path = Path::new(SYSTEM_SOUNDS_DIR);
-    if !system_sounds_path.exists() {
-        return DEFAULT_SOUNDS.iter().map(|s| s.to_string()).collect();
-    }
+    let sounds_dir = Path::new(system_sounds_dir());
+    let ext = system_sound_extension();
 
-    let mut sounds = Vec::new();
-    if let Ok(entries) = fs::read_dir(system_sounds_path) {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.ends_with(".aiff") {
-                    let sound_name = name.trim_end_matches(".aiff");
-                    sounds.push(sound_name.to_string());
+    if sounds_dir.exists() {
+        let mut sounds = Vec::new();
+        if let Ok(entries) = fs::read_dir(sounds_dir) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.ends_with(ext) {
+                        let sound_name = name.trim_end_matches(ext);
+                        sounds.push(sound_name.to_string());
+                    }
                 }
             }
         }
+        sounds.sort();
+        if !sounds.is_empty() {
+            return sounds;
+        }
     }
 
-    sounds.sort();
-    if sounds.is_empty() {
-        DEFAULT_SOUNDS.iter().map(|s| s.to_string()).collect()
-    } else {
-        sounds
-    }
+    // Fallback to built-in list
+    system_sound_names().iter().map(|s| s.to_string()).collect()
 }
 
 fn validate_sound_path(
@@ -64,7 +63,8 @@ fn validate_sound_path(
             Ok(Validation::Invalid("Sound file does not exist".into()))
         }
     } else {
-        let system_sound_path = Path::new(SYSTEM_SOUNDS_DIR).join(format!("{}.aiff", sound));
+        let system_sound_path = Path::new(system_sounds_dir())
+            .join(format!("{}{}", sound, system_sound_extension()));
         if system_sound_path.exists() {
             Ok(Validation::Valid)
         } else {
@@ -73,8 +73,37 @@ fn validate_sound_path(
     }
 }
 
+fn install_icon() -> Result<Option<PathBuf>> {
+    // Find the icon in the repo assets
+    let exe_path = std::env::current_exe()?;
+    let candidates = [
+        exe_path
+            .parent()
+            .and_then(|d| d.parent())
+            .map(|d| d.join("assets/claude-icon.png")),
+        exe_path
+            .parent()
+            .map(|d| d.join("assets/claude-icon.png")),
+        Some(PathBuf::from("assets/claude-icon.png")),
+    ];
+
+    let source = candidates.iter().filter_map(|c| c.as_ref()).find(|p| p.exists());
+
+    if let Some(source_path) = source {
+        let home = std::env::var("HOME")?;
+        let dest_dir = PathBuf::from(&home).join(".local/share/claude-code-notification");
+        fs::create_dir_all(&dest_dir)?;
+        let dest = dest_dir.join("claude-icon.png");
+        fs::copy(source_path, &dest)?;
+        println!("  Icon installed to: {}", dest.display());
+        return Ok(Some(dest));
+    }
+
+    Ok(None)
+}
+
 pub fn run_setup() -> Result<()> {
-    println!("🔧 Setting up Claude Code notifications\n");
+    println!("Setting up Claude Code notifications\n");
 
     let available_sounds = get_available_system_sounds();
     let mut sound_options: Vec<String> = available_sounds;
@@ -87,22 +116,33 @@ pub fn run_setup() -> Result<()> {
         .prompt()?;
 
     let selected_sound = if sound_choice == "Custom file path..." {
+        let help = if cfg!(target_os = "macos") {
+            "Supported formats: .wav, .aiff, .mp3, .m4a"
+        } else {
+            "Supported formats: .wav, .ogg, .oga, .mp3, .flac"
+        };
         Text::new("Enter the path to your custom sound file:")
-            .with_help_message("Supported formats: .wav, .aiff, .mp3, .m4a")
+            .with_help_message(help)
             .with_validator(validate_sound_path)
             .prompt()?
     } else {
         sound_choice
     };
 
+    // Install icon
+    println!("\nInstalling notification icon...");
+    match install_icon() {
+        Ok(Some(_)) => println!("  Icon installed successfully."),
+        Ok(None) => println!("  Icon not found in assets/ - notifications will use default icon."),
+        Err(e) => println!("  Warning: Could not install icon: {}", e),
+    }
+
     let settings_path = get_claude_settings_path()?;
 
-    // Create .claude directory if it doesn't exist
     if let Some(parent) = settings_path.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    // Read existing settings or create new ones
     let mut settings: Value = if settings_path.exists() {
         let content = fs::read_to_string(&settings_path)?;
         serde_json::from_str(&content).unwrap_or_else(|_| json!({}))
@@ -110,7 +150,6 @@ pub fn run_setup() -> Result<()> {
         json!({})
     };
 
-    // Update the hooks configuration
     let notification_command = if selected_sound.contains('/') {
         format!("claude-code-notification --sound \"{}\"", selected_sound)
     } else {
@@ -130,13 +169,12 @@ pub fn run_setup() -> Result<()> {
         ]
     });
 
-    // Write updated settings
     let settings_json = serde_json::to_string_pretty(&settings)?;
     fs::write(&settings_path, settings_json)?;
 
-    println!("✅ Claude Code settings updated successfully!");
-    println!("📁 Settings file: {}", settings_path.display());
-    println!("🔊 Selected sound: {}", selected_sound);
+    println!("\nClaude Code settings updated successfully!");
+    println!("  Settings file: {}", settings_path.display());
+    println!("  Selected sound: {}", selected_sound);
     println!("\nYour Claude Code notifications are now configured.");
 
     Ok(())
@@ -150,19 +188,16 @@ mod tests {
 
     #[test]
     fn test_generated_settings_match_schema() {
-        // Fetch the Claude Code settings schema
         let schema_response =
             reqwest::blocking::get("https://www.schemastore.org/claude-code-settings.json")
                 .expect("Failed to fetch schema from schemastore.org");
 
         let schema_json: Value = schema_response.json().expect("Failed to parse schema JSON");
 
-        // Compile the schema
         let validator =
             jsonschema::validator_for(&schema_json).expect("Failed to compile JSON schema");
 
-        // Generate sample settings JSON like our setup command does
-        let notification_command = "claude-code-notification --sound Glass";
+        let notification_command = "claude-code-notification --sound message-new-instant";
 
         let test_settings = json!({
             "hooks": {
@@ -179,15 +214,12 @@ mod tests {
             }
         });
 
-        // Validate the generated JSON against the schema
         if validator.is_valid(&test_settings) {
-            // Test passed - our JSON structure matches the schema
             println!(
-                "✅ Generated settings JSON successfully validates against Claude Code schema"
+                "Generated settings JSON successfully validates against Claude Code schema"
             );
         } else {
-            // Print detailed error information for debugging
-            eprintln!("❌ Schema validation failed:");
+            eprintln!("Schema validation failed:");
             for error in validator.iter_errors(&test_settings) {
                 eprintln!("  - {}", error);
                 eprintln!("    Instance path: {}", error.instance_path);
@@ -199,12 +231,10 @@ mod tests {
 
     #[test]
     fn test_settings_creation_and_validation() {
-        // Create a temporary directory for testing
         let temp_dir = TempDir::new().expect("Failed to create temporary directory");
         let temp_settings_path = temp_dir.path().join("test_settings.json");
 
-        // Create sample settings using our internal logic
-        let notification_command = "claude-code-notification --sound Submarine";
+        let notification_command = "claude-code-notification --sound complete";
         let mut settings = json!({});
 
         settings["hooks"] = json!({
@@ -220,20 +250,17 @@ mod tests {
             ]
         });
 
-        // Write the settings to file
         let settings_json =
             serde_json::to_string_pretty(&settings).expect("Failed to serialize settings");
         std::fs::write(&temp_settings_path, &settings_json)
             .expect("Failed to write test settings file");
 
-        // Read back and verify the structure
         let read_settings: Value = serde_json::from_str(
             &std::fs::read_to_string(&temp_settings_path)
                 .expect("Failed to read test settings file"),
         )
         .expect("Failed to parse read settings");
 
-        // Verify the structure matches what we expect
         assert!(read_settings["hooks"].is_object());
         assert!(read_settings["hooks"]["Notification"].is_array());
 
@@ -251,19 +278,17 @@ mod tests {
 
     #[test]
     fn test_validate_sound_path_system_sound() {
-        let result = validate_sound_path("Glass");
-        // This might fail on systems without the sound file, but that's expected
+        let test_sound = if cfg!(target_os = "macos") {
+            "Glass"
+        } else {
+            "bell"
+        };
+        let result = validate_sound_path(test_sound);
         match result {
-            Ok(validation) => {
-                // If it succeeds, it should be valid
-                if let inquire::validator::Validation::Valid = validation {
-                    // Test passes
-                } else {
-                    // System doesn't have the sound file - that's okay for testing
-                }
+            Ok(_validation) => {
+                // Valid or invalid depending on whether sound files exist on this system
             }
             Err(_) => {
-                // Error in validation function - that's a real problem
                 panic!("Sound path validation function failed");
             }
         }
@@ -271,15 +296,11 @@ mod tests {
 
     #[test]
     fn test_validate_sound_path_custom_file() {
-        // Test with a non-existent custom file
         let result = validate_sound_path("/nonexistent/file.wav");
         match result {
             Ok(validation) => {
-                // Should be invalid since file doesn't exist
                 match validation {
-                    inquire::validator::Validation::Invalid(_) => {
-                        // Expected result
-                    }
+                    inquire::validator::Validation::Invalid(_) => {}
                     inquire::validator::Validation::Valid => {
                         panic!("Validation should fail for non-existent file");
                     }
@@ -294,12 +315,6 @@ mod tests {
     #[test]
     fn test_get_available_system_sounds() {
         let sounds = get_available_system_sounds();
-
-        // Should return at least some sounds (either from filesystem or defaults)
         assert!(!sounds.is_empty());
-
-        // Should include some expected default sounds
-        let sound_names: std::collections::HashSet<_> = sounds.iter().collect();
-        assert!(sound_names.contains(&"Glass".to_string()));
     }
 }

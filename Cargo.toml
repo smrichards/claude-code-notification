@@ -3,10 +3,10 @@ name = "claude-code-notification"
 version = "0.2.0"
 edition = "2021"
 authors = ["Wyatt Johnson"]
-description = "Claude Code hook for displaying macOS desktop notifications"
+description = "Claude Code hook for displaying cross-platform desktop notifications"
 license = "MIT"
 repository = "https://github.com/wyattjoh/claude-code-notifier"
-keywords = ["cli", "claude", "notifications", "hooks", "macos"]
+keywords = ["cli", "claude", "notifications", "hooks", "linux", "macos"]
 categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Arg, Command};
-use claude_code_notification::{main as notification_main, Sound};
+use claude_code_notification::{default_sound_name, main as notification_main, Sound};
 use std::io;
 
 mod setup;
@@ -13,8 +13,8 @@ fn main() -> Result<()> {
             Arg::new("sound")
                 .long("sound")
                 .value_name("SOUND_NAME")
-                .help("System sound to play with notification")
-                .default_value("Glass"),
+                .help("System sound name or path to audio file")
+                .default_value(default_sound_name()),
         )
         .subcommand(Command::new("setup").about("Configure Claude Code settings for notifications"))
         .get_matches();

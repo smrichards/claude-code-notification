@@ -1,7 +1,7 @@
 pub mod error;
 
 use anyhow::Result;
-use notify_rust::Notification;
+use notify_rust::{Hint, Notification, Timeout, Urgency};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::process::Command;
@@ -17,98 +17,101 @@ pub struct NotificationInput {
     pub title: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub enum Sound {
-    #[default]
-    Glass,
-    Submarine,
-    Frog,
-    Purr,
-    Basso,
-    Blow,
-    Bottle,
-    Funk,
-    Hero,
-    Morse,
-    Ping,
-    Pop,
-    Sosumi,
-    Tink,
+    System(String),
     Custom(String),
+}
+
+impl Default for Sound {
+    fn default() -> Self {
+        Sound::System(default_sound_name().to_string())
+    }
+}
+
+/// Returns the default sound name for the current platform.
+pub fn default_sound_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Glass"
+    } else {
+        "message-new-instant"
+    }
+}
+
+/// Returns the list of available system sound names for the current platform.
+pub fn system_sound_names() -> &'static [&'static str] {
+    if cfg!(target_os = "macos") {
+        &[
+            "Basso", "Blow", "Bottle", "Frog", "Funk", "Glass", "Hero", "Morse", "Ping", "Pop",
+            "Purr", "Sosumi", "Submarine", "Tink",
+        ]
+    } else {
+        &[
+            "bell",
+            "complete",
+            "message-new-instant",
+            "message",
+            "dialog-information",
+            "dialog-warning",
+            "dialog-error",
+            "window-attention",
+            "device-added",
+            "service-login",
+            "alarm-clock-elapsed",
+            "camera-shutter",
+            "screen-capture",
+            "phone-incoming-call",
+            "trash-empty",
+        ]
+    }
 }
 
 impl Sound {
     pub fn from_name(name: &str) -> Self {
-        match name {
-            "Glass" => Sound::Glass,
-            "Submarine" => Sound::Submarine,
-            "Frog" => Sound::Frog,
-            "Purr" => Sound::Purr,
-            "Basso" => Sound::Basso,
-            "Blow" => Sound::Blow,
-            "Bottle" => Sound::Bottle,
-            "Funk" => Sound::Funk,
-            "Hero" => Sound::Hero,
-            "Morse" => Sound::Morse,
-            "Ping" => Sound::Ping,
-            "Pop" => Sound::Pop,
-            "Sosumi" => Sound::Sosumi,
-            "Tink" => Sound::Tink,
-            custom => Sound::Custom(custom.to_string()),
+        if name.contains('/') {
+            Sound::Custom(name.to_string())
+        } else {
+            Sound::System(name.to_string())
         }
     }
 
     pub fn as_str(&self) -> &str {
         match self {
-            Sound::Glass => "Glass",
-            Sound::Submarine => "Submarine",
-            Sound::Frog => "Frog",
-            Sound::Purr => "Purr",
-            Sound::Basso => "Basso",
-            Sound::Blow => "Blow",
-            Sound::Bottle => "Bottle",
-            Sound::Funk => "Funk",
-            Sound::Hero => "Hero",
-            Sound::Morse => "Morse",
-            Sound::Ping => "Ping",
-            Sound::Pop => "Pop",
-            Sound::Sosumi => "Sosumi",
-            Sound::Tink => "Tink",
-            Sound::Custom(name) => name,
+            Sound::System(name) => name,
+            Sound::Custom(path) => path,
         }
     }
 
-    pub fn get_afplay_path(&self) -> String {
-        let sound_name = self.as_str();
-
-        // If the sound name contains a slash, treat it as a custom path
-        if sound_name.contains('/') {
-            sound_name.to_string()
-        } else {
-            // System sound - add path prefix and .aiff extension
-            format!("/System/Library/Sounds/{}.aiff", sound_name)
+    /// Resolves the sound to a file path for the current platform.
+    pub fn resolve_path(&self) -> String {
+        match self {
+            Sound::Custom(path) => path.clone(),
+            Sound::System(name) => {
+                if cfg!(target_os = "macos") {
+                    format!("/System/Library/Sounds/{}.aiff", name)
+                } else {
+                    format!("/usr/share/sounds/freedesktop/stereo/{}.oga", name)
+                }
+            }
         }
     }
 }
 
 pub fn main<R: Read>(mut stdin: R, sound: Sound) -> Result<()> {
-    // Read all input from stdin
     let mut buffer = String::new();
     stdin.read_to_string(&mut buffer)?;
 
-    // Parse the JSON input
     let input: NotificationInput = serde_json::from_str(&buffer)?;
 
-    // Create and send the notification
     send_notification(&input, &sound)?;
 
     Ok(())
 }
 
+
 fn send_notification(input: &NotificationInput, sound: &Sound) -> Result<()> {
     let title = input.title.as_deref().unwrap_or("Claude Code");
 
-    // Clone the sound for the thread
     let sound_clone = sound.clone();
 
     // Spawn a thread to play the sound in parallel
@@ -119,43 +122,83 @@ fn send_notification(input: &NotificationInput, sound: &Sound) -> Result<()> {
     });
 
     // Show the notification (this happens in parallel with sound)
-    let notification_result = Notification::new()
+    let mut notification = Notification::new();
+    notification
         .summary(title)
         .body(&input.message)
-        .show();
+        .appname("Claude Code")
+        .hint(Hint::DesktopEntry("claude-code-notification".to_string()))
+        .hint(Hint::Category("im.received".to_string()))
+        .urgency(Urgency::Normal)
+        .timeout(Timeout::Milliseconds(5000))
+        .icon("claude-code-notification");
+
+    let notification_result = notification.show();
 
     // Wait for the sound thread to complete
     if let Err(e) = sound_handle.join() {
         eprintln!("Warning: Sound thread panicked: {:?}", e);
     }
 
-    // Return the notification result
     notification_result?;
     Ok(())
 }
 
+fn find_audio_player() -> Option<(&'static str, Vec<&'static str>)> {
+    if cfg!(target_os = "macos") {
+        return Some(("afplay", vec![]));
+    }
+
+    // Linux: try players in order of preference
+    let players: &[(&str, &[&str])] = &[
+        ("pw-play", &[]),
+        ("paplay", &[]),
+        ("aplay", &[]),
+        ("ffplay", &["-nodisp", "-autoexit", "-loglevel", "quiet"]),
+    ];
+
+    for (player, args) in players {
+        if Command::new("which")
+            .arg(player)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            return Some((player, args.to_vec()));
+        }
+    }
+    None
+}
+
 fn play_sound(sound: &Sound) -> Result<()> {
-    let sound_path = sound.get_afplay_path();
+    let sound_path = sound.resolve_path();
 
-    // Execute afplay command to play the sound
-    let output = Command::new("afplay").arg(&sound_path).output();
+    let Some((player, extra_args)) = find_audio_player() else {
+        eprintln!("Warning: No audio player found. Install paplay, pw-play, or aplay for sound support.");
+        return Ok(());
+    };
 
-    match output {
+    let mut cmd = Command::new(player);
+    cmd.arg(&sound_path);
+    for arg in &extra_args {
+        cmd.arg(arg);
+    }
+
+    match cmd.output() {
         Ok(result) => {
             if !result.status.success() {
-                // Log a warning but don't fail the whole notification
                 eprintln!(
-                    "Warning: Failed to play sound '{}'. afplay exit code: {:?}",
+                    "Warning: Failed to play sound '{}'. {} exit code: {:?}",
                     sound_path,
+                    player,
                     result.status.code()
                 );
             }
         }
         Err(e) => {
-            // Log a warning but don't fail the whole notification
             eprintln!(
-                "Warning: Failed to execute afplay for sound '{}': {}",
-                sound_path, e
+                "Warning: Failed to execute {} for sound '{}': {}",
+                player, sound_path, e
             );
         }
     }
@@ -177,7 +220,6 @@ mod tests {
             "title": "Test Title"
         }"#;
 
-        // Test that we can parse the JSON correctly
         let input: Result<NotificationInput, _> = serde_json::from_str(input_data);
         assert!(input.is_ok());
 
@@ -195,7 +237,6 @@ mod tests {
             "message": "Message without title"
         }"#;
 
-        // Test that we can parse the JSON correctly
         let input: Result<NotificationInput, _> = serde_json::from_str(input_data);
         assert!(input.is_ok());
 
@@ -209,7 +250,7 @@ mod tests {
     fn test_parse_invalid_json() {
         let invalid_json = "{ invalid json }";
         let cursor = Cursor::new(invalid_json);
-        let result = main(cursor, Sound::Glass);
+        let result = main(cursor, Sound::default());
 
         assert!(result.is_err());
     }
@@ -218,28 +259,34 @@ mod tests {
     fn test_empty_input() {
         let empty_input = "";
         let cursor = Cursor::new(empty_input);
-        let result = main(cursor, Sound::Glass);
+        let result = main(cursor, Sound::default());
 
         assert!(result.is_err());
     }
 
     #[test]
     fn test_sound_from_name() {
-        assert!(matches!(Sound::from_name("Glass"), Sound::Glass));
-        assert!(matches!(Sound::from_name("Submarine"), Sound::Submarine));
-        assert!(matches!(Sound::from_name("CustomSound"), Sound::Custom(_)));
+        assert!(matches!(Sound::from_name("bell"), Sound::System(_)));
+        assert!(matches!(Sound::from_name("complete"), Sound::System(_)));
+        assert!(matches!(
+            Sound::from_name("/path/to/sound.wav"),
+            Sound::Custom(_)
+        ));
     }
 
     #[test]
     fn test_sound_as_str() {
-        assert_eq!(Sound::Glass.as_str(), "Glass");
-        assert_eq!(Sound::Submarine.as_str(), "Submarine");
-        assert_eq!(Sound::Custom("Test".to_string()).as_str(), "Test");
+        assert_eq!(Sound::System("bell".into()).as_str(), "bell");
+        assert_eq!(
+            Sound::Custom("/path/sound.wav".into()).as_str(),
+            "/path/sound.wav"
+        );
     }
 
     #[test]
     fn test_sound_default() {
-        assert!(matches!(Sound::default(), Sound::Glass));
+        let sound = Sound::default();
+        assert!(matches!(sound, Sound::System(_)));
     }
 
     #[test]
@@ -251,7 +298,6 @@ mod tests {
             "title": "Title with \"quotes\""
         }"#;
 
-        // Test that we can parse the JSON with special characters correctly
         let input: Result<NotificationInput, _> = serde_json::from_str(input_data);
         assert!(input.is_ok());
 
@@ -261,37 +307,35 @@ mod tests {
     }
 
     #[test]
-    fn test_sound_path_resolution() {
-        // Test system sound path resolution
-        assert_eq!(
-            Sound::Glass.get_afplay_path(),
-            "/System/Library/Sounds/Glass.aiff"
-        );
-        assert_eq!(
-            Sound::Submarine.get_afplay_path(),
-            "/System/Library/Sounds/Submarine.aiff"
-        );
-
-        // Test custom path pass-through
-        let custom_sound = Sound::Custom("/custom/path/sound.wav".to_string());
-        assert_eq!(custom_sound.get_afplay_path(), "/custom/path/sound.wav");
-
-        // Test relative path pass-through
-        let relative_sound = Sound::Custom("./sounds/custom.aiff".to_string());
-        assert_eq!(relative_sound.get_afplay_path(), "./sounds/custom.aiff");
+    fn test_sound_path_resolution_system() {
+        let sound = Sound::System("bell".into());
+        let path = sound.resolve_path();
+        if cfg!(target_os = "macos") {
+            assert_eq!(path, "/System/Library/Sounds/bell.aiff");
+        } else {
+            assert_eq!(path, "/usr/share/sounds/freedesktop/stereo/bell.oga");
+        }
     }
 
     #[test]
-    fn test_sound_path_edge_cases() {
-        // Test sound name that happens to contain a slash but isn't meant as a path
-        let edge_case = Sound::Custom("weird/name".to_string());
-        assert_eq!(edge_case.get_afplay_path(), "weird/name");
+    fn test_sound_path_resolution_custom() {
+        let sound = Sound::Custom("/custom/path/sound.wav".into());
+        assert_eq!(sound.resolve_path(), "/custom/path/sound.wav");
 
-        // Test empty custom sound (edge case) - gets treated as system sound
-        let empty_custom = Sound::Custom("".to_string());
-        assert_eq!(
-            empty_custom.get_afplay_path(),
-            "/System/Library/Sounds/.aiff"
-        );
+        let relative = Sound::Custom("./sounds/custom.ogg".into());
+        assert_eq!(relative.resolve_path(), "./sounds/custom.ogg");
+    }
+
+    #[test]
+    fn test_system_sound_names_not_empty() {
+        let names = system_sound_names();
+        assert!(!names.is_empty());
+    }
+
+    #[test]
+    fn test_default_sound_name_in_list() {
+        let default = default_sound_name();
+        let names = system_sound_names();
+        assert!(names.contains(&default));
     }
 }
